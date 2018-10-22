@@ -68,7 +68,7 @@ flags.DEFINE_integer("intra_op_parallelism_threads", 0,
 # TODO(hinsu): Enable DistributionStrategy by default once performance gap
 # between DistributionStrategy and Parallelism is resolved.
 flags.DEFINE_bool(
-    "optionally_use_dist_strat", False,
+    "optionally_use_dist_strat", True,
     "Whether to use TensorFlow DistributionStrategy instead of explicitly "
     "replicating the model. DistributionStrategy is used only if the "
     "model replication configuration is supported by the DistributionStrategy.")

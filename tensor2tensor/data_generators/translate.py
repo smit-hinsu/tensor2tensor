@@ -20,6 +20,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import sys
 import tarfile
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import problem
@@ -89,6 +90,9 @@ def compute_bleu_summaries(hook_args):
   values.append(tf.Summary.Value(tag="BLEU", simple_value=bleu))
   tf.logging.info("%s: BLEU = %6.2f" % (decode_hparams.decode_to_file, bleu))
   mlperf_log.transformer_print(key=mlperf_log.EVAL_ACCURACY, value=bleu)
+  if bleu > 25.0:
+    print("Reached BLEU score of 25.0. Exiting.")
+    sys.exit(0)
   return values
 
 

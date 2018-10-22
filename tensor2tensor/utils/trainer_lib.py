@@ -350,9 +350,17 @@ class T2TExperiment(object):
 
   def continuous_train_and_eval(self, continuous_eval_predicate_fn=None):
     del continuous_eval_predicate_fn
-    tf.estimator.train_and_evaluate(self._estimator, self._train_spec,
-                                    self._eval_spec)
-    return self.evaluate()
+    for epoch in range(10):
+      tf.estimator.train_and_evaluate(self._estimator, self._train_spec,
+                                      self._eval_spec)
+      tf.logging.info("Finished training epoch %d." % (epoch))
+
+      self.evaluate()
+      tf.logging.info("Finished evaluation epoch %d." % (epoch))
+
+      self.decode(decode_from_file=True)
+      tf.logging.info("Finished decode epoch %d." % (epoch))
+
 
   def train_and_evaluate(self):
     if self._use_validation_monitor:
@@ -546,7 +554,7 @@ def create_experiment(
   # Input fns from Problem
   problem = hparams.problem
   train_input_fn = problem.make_estimator_input_fn(tf.estimator.ModeKeys.TRAIN,
-                                                   hparams)
+                                                   hparams, prevent_repeat=True)
   eval_input_fn = problem.make_estimator_input_fn(tf.estimator.ModeKeys.EVAL,
                                                   hparams)
 
