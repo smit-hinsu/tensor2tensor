@@ -626,7 +626,7 @@ def calc_loss_psnr(gen_images, images, name, hparams=None, use_l1_loss=False):
 
 
 @registry.register_model
-class NextFrameEpva(sv2p.NextFrameSv2p):
+class NextFrameEpva(sv2p.NextFrameSv2pLegacy):
   """Hierarchical Long-term Video Prediction without Supervision"""
 
   def body(self, features):
@@ -711,9 +711,18 @@ class NextFrameEpva(sv2p.NextFrameSv2p):
     side_by_side_video = tf.concat([frames_gd, frames_pd], axis=1)
     tf.summary.image('full_video', side_by_side_video)
 
+    predictions = tf.unstack(predictions)
+    predictions = [
+        tf.image.resize_images(
+            image, (frame_width, frame_height),
+            method=tf.image.ResizeMethod.BICUBIC)
+        for image in predictions
+    ]
+    predictions = tf.stack(predictions)
+
     predictions = common_video.swap_time_and_batch_axes(predictions)
     predictions = tf.slice(predictions,
-                           [0, hparams.video_num_target_frames-1, 0, 0, 0],
+                           [0, hparams.video_num_input_frames-1, 0, 0, 0],
                            [-1]*5)
 
     return predictions, {'extra': epva_loss}

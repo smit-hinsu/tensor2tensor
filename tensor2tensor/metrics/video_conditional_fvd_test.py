@@ -13,32 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Gym generators tests."""
+"""Tests for video_conditional_fvd."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import os
-import shutil
-
-from tensor2tensor.data_generators import gym_problems_specs
-
+from tensor2tensor.metrics import video_conditional_fvd
 import tensorflow as tf
 
 
-class GymProblemsTest(tf.test.TestCase):
+class VideoConditionalFvdTest(tf.test.TestCase):
 
-  @classmethod
-  def setUpClass(cls):
-    cls.tmp_dir = tf.test.get_temp_dir()
-    shutil.rmtree(cls.tmp_dir)
-    os.mkdir(cls.tmp_dir)
+  def test_sample(self):
+    dataset = video_conditional_fvd.VideoEvaluationDataset(
+        n_input_frames=4,
+        n_output_frames=10,
+        get_video_batch_fn=None)
+    model = video_conditional_fvd.Model(
+        apply_fn=None,
+        load_fn=None)
+    video_conditional_fvd.evaluate_model(dataset, model, 10, 16)
 
-  def testGymAtariGameModes(self):
-    problem = gym_problems_specs.GymDiscreteProblemWithAgentOnWrappedFullPong()
-    self.assertEqual(210, problem.frame_height)
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
   tf.test.main()

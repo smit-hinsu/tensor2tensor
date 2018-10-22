@@ -23,9 +23,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-
-from tensor2tensor.mesh_tensorflow import mesh_tensorflow as mtf
-from tensor2tensor.mesh_tensorflow import mtf_layers
+import mesh_tensorflow as mtf
 import tensorflow as tf
 
 
@@ -137,10 +135,10 @@ def transformer_moe_layer_v1(inputs, output_dim, hparams, train):
       [experts_dim, batch_dim_unsplit, expert_capacity_dim, input_dim]))
 
   # Now feed the expert inputs through the experts.
-  h = mtf_layers.dense(
+  h = mtf.layers.dense(
       expert_inputs, hidden_dim, expert_dims=[experts_dim],
       activation=mtf.relu, use_bias=False, name="x0")
-  expert_output = mtf_layers.dense(
+  expert_output = mtf.layers.dense(
       h, output_dim, expert_dims=[experts_dim], use_bias=False, name="x1")
 
   expert_output = mtf.reshape(expert_output, mtf.Shape(
@@ -370,10 +368,10 @@ def transformer_moe_layer_v2(inputs, output_dim, hparams, train):
       [y0, x1, h, d, m]))
 
   # Now feed the expert inputs through the experts.
-  hidden_output = mtf_layers.dense(
+  hidden_output = mtf.layers.dense(
       expert_inputs_y, hidden_dim, expert_dims=[y0, x1],
       activation=mtf.relu, use_bias=False, name="expert0")
-  expert_output = mtf_layers.dense(
+  expert_output = mtf.layers.dense(
       hidden_output, output_dim, expert_dims=[y0, x1],
       use_bias=False, name="expert1")
 
@@ -471,9 +469,13 @@ def _top_2_gating(
   """
   group_size_dim, unused_input_dim = inputs.shape.dims[-2:]
 
-  raw_gates = mtf.softmax(mtf_layers.dense(
+  raw_gates = mtf.softmax(mtf.layers.dense(
       inputs, experts_dim, use_bias=False,
       expert_dims=outer_expert_dims), experts_dim)
+
+  # The internals of this function run in float32.
+  #   bfloat16 seems to reduce quality.
+  raw_gates = mtf.to_float(raw_gates)
 
   expert_capacity_f = float(expert_capacity_dim.size)
 
@@ -590,6 +592,9 @@ def _top_2_gating(
       gate_2 * mask_2_flat
       * mtf.one_hot(index_2, experts_dim)
       * mtf.one_hot(mtf.to_int32(position_in_expert_2), expert_capacity_dim))
+
+  combine_tensor = mtf.cast(combine_tensor, inputs.dtype)
+  loss = mtf.cast(loss, inputs.dtype)
 
   dispatch_tensor = mtf.cast(
       mtf.cast(combine_tensor, tf.bool), combine_tensor.dtype)

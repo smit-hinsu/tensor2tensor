@@ -27,6 +27,7 @@ from tensor2tensor.data_generators import problem  # pylint: disable=unused-impo
 from tensor2tensor.utils import cloud_mlengine
 from tensor2tensor.utils import decoding
 from tensor2tensor.utils import flags as t2t_flags  # pylint: disable=unused-import
+from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import trainer_lib
 from tensor2tensor.utils import usr_dir
@@ -64,6 +65,13 @@ flags.DEFINE_integer("inter_op_parallelism_threads", 0,
 flags.DEFINE_integer("intra_op_parallelism_threads", 0,
                      "Number of intra_op_parallelism_threads to use for CPU. "
                      "See TensorFlow config.proto for details.")
+# TODO(hinsu): Enable DistributionStrategy by default once performance gap
+# between DistributionStrategy and Parallelism is resolved.
+flags.DEFINE_bool(
+    "optionally_use_dist_strat", False,
+    "Whether to use TensorFlow DistributionStrategy instead of explicitly "
+    "replicating the model. DistributionStrategy is used only if the "
+    "model replication configuration is supported by the DistributionStrategy.")
 
 # To maintain compatibility with some internal libs, we guard against these flag
 # definitions possibly erroring. Apologies for the ugliness.
@@ -215,6 +223,7 @@ def create_run_config(hp, output_dir=None):
       hp.activation_dtype == "float32" and
       hp.weight_dtype == "float32")
   return trainer_lib.create_run_config(
+      model_name=FLAGS.model,
       model_dir=output_dir or os.path.expanduser(FLAGS.output_dir),
       master=FLAGS.master,
       iterations_per_loop=FLAGS.iterations_per_loop,
@@ -234,6 +243,7 @@ def create_run_config(hp, output_dir=None):
       use_tpu_estimator=FLAGS.use_tpu_estimator,
       schedule=FLAGS.schedule,
       no_data_parallelism=hp.no_data_parallelism,
+      optionally_use_dist_strat=FLAGS.optionally_use_dist_strat,
       daisy_chain_variables=daisy_chain_variables,
       ps_replicas=FLAGS.ps_replicas,
       ps_job=FLAGS.ps_job,
@@ -334,6 +344,7 @@ def run_std_server():
 
 def main(argv):
   tf.logging.set_verbosity(tf.logging.INFO)
+  mlperf_log.transformer_print(key=mlperf_log.RUN_START)
   if FLAGS.schedule == "run_std_server":
     run_std_server()
   trainer_lib.set_random_seed(FLAGS.random_seed)
@@ -359,6 +370,8 @@ def main(argv):
   if is_chief():
     save_metadata(hparams)
   execute_schedule(exp)
+  mlperf_log.transformer_print(key=mlperf_log.RUN_STOP)
+  mlperf_log.transformer_print(key=mlperf_log.RUN_FINAL)
 
 
 if __name__ == "__main__":

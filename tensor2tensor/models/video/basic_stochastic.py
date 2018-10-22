@@ -22,6 +22,7 @@ from __future__ import print_function
 from tensor2tensor.layers import common_attention
 from tensor2tensor.layers import common_layers
 from tensor2tensor.layers import common_video
+from tensor2tensor.layers import discretization
 
 from tensor2tensor.models.video import base_vae
 from tensor2tensor.models.video import basic_deterministic
@@ -31,6 +32,8 @@ from tensor2tensor.utils import registry
 
 import tensorflow as tf
 
+tfl = tf.layers
+
 
 @registry.register_model
 class NextFrameBasicStochastic(
@@ -38,23 +41,22 @@ class NextFrameBasicStochastic(
     base_vae.NextFrameBaseVae):
   """Stochastic version of basic next-frame model."""
 
-  def inject_latent(self, layer, features, filters):
+  def inject_latent(self, layer, inputs, target):
     """Inject a VAE-style latent."""
     # Latent for stochastic model
-    input_frames = tf.to_float(features["inputs_raw"])
-    target_frames = tf.to_float(features["targets_raw"])
-    full_video = tf.concat([input_frames, target_frames], axis=1)
+    filters = 128
+    full_video = tf.stack(inputs + [target], axis=1)
     latent_mean, latent_std = self.construct_latent_tower(
         full_video, time_axis=1)
     latent = common_video.get_gaussian_tensor(latent_mean, latent_std)
-    latent = tf.layers.flatten(latent)
+    latent = tfl.flatten(latent)
     latent = tf.expand_dims(latent, axis=1)
     latent = tf.expand_dims(latent, axis=1)
-    latent_mask = tf.layers.dense(latent, filters, name="latent_mask")
+    latent_mask = tfl.dense(latent, filters, name="latent_mask")
     zeros_mask = tf.zeros(
         common_layers.shape_list(layer)[:-1] + [filters], dtype=tf.float32)
     layer = tf.concat([layer, latent_mask + zeros_mask], axis=-1)
-    extra_loss = self.get_extra_loss(latent_mean, latent_std)
+    extra_loss = self.get_kl_loss([latent_mean], [latent_std])
     return layer, extra_loss
 
 
@@ -63,37 +65,37 @@ class NextFrameBasicStochasticDiscrete(
     basic_deterministic.NextFrameBasicDeterministic):
   """Basic next-frame model with a tiny discrete latent."""
 
-  def inject_latent(self, layer, features, filters):
+  def inject_latent(self, layer, inputs, target):
     """Inject a deterministic latent based on the target frame."""
-    del filters
     hparams = self.hparams
     final_filters = common_layers.shape_list(layer)[-1]
     filters = hparams.hidden_size
     kernel = (4, 4)
+    layer_shape = common_layers.shape_list(layer)
 
-    def add_d(layer, d):
-      z_mul = tf.layers.dense(d, final_filters, name="unbottleneck_mul")
+    def add_bits(layer, bits):
+      z_mul = tfl.dense(bits, final_filters, name="unbottleneck_mul")
       if not hparams.complex_addn:
         return layer + z_mul
       layer *= tf.nn.sigmoid(z_mul)
-      z_add = tf.layers.dense(d, final_filters, name="unbottleneck_add")
+      z_add = tfl.dense(bits, final_filters, name="unbottleneck_add")
       layer += z_add
       return layer
 
     if self.is_predicting:
-      layer_shape = common_layers.shape_list(layer)
       if hparams.full_latent_tower:
         rand = tf.random_uniform(layer_shape[:-1] + [hparams.bottleneck_bits])
+        bits = 2.0 * tf.to_float(tf.less(0.5, rand)) - 1.0
       else:
-        rand = tf.random_uniform(layer_shape[:-3] + [
-            1, 1, hparams.bottleneck_bits])
-      d = 2.0 * tf.to_float(tf.less(0.5, rand)) - 1.0
-      return add_d(layer, d), 0.0
+        bits, _ = discretization.predict_bits_with_lstm(
+            layer, hparams.latent_predictor_state_size, hparams.bottleneck_bits,
+            temperature=hparams.latent_predictor_temperature)
+        bits = tf.expand_dims(tf.expand_dims(bits, axis=1), axis=2)
+      return add_bits(layer, bits), 0.0
 
     # Embed.
-    frames = tf.concat(
-        [features["cur_target_frame"], features["inputs"]], axis=-1)
-    x = tf.layers.dense(
+    frames = tf.concat(inputs + [target], axis=-1)
+    x = tfl.dense(
         frames, filters, name="latent_embed",
         bias_initializer=tf.random_normal_initializer(stddev=0.01))
     x = common_attention.add_timing_signal_nd(x)
@@ -105,23 +107,23 @@ class NextFrameBasicStochasticDiscrete(
           if i < hparams.filter_double_steps:
             filters *= 2
           x = common_attention.add_timing_signal_nd(x)
-          x = tf.layers.conv2d(x, filters, kernel,
-                               activation=common_layers.belu,
-                               strides=(2, 2), padding="SAME")
+          x = tfl.conv2d(x, filters, kernel,
+                         activation=common_layers.belu,
+                         strides=(2, 2), padding="SAME")
           x = common_layers.layer_norm(x)
     else:
       x = common_layers.double_discriminator(x)
       x = tf.expand_dims(tf.expand_dims(x, axis=1), axis=1)
-    x = tf.tanh(tf.layers.dense(x, hparams.bottleneck_bits, name="bottleneck"))
-    d = x + tf.stop_gradient(2.0 * tf.to_float(tf.less(0.0, x)) - 1.0 - x)
-    if hparams.mode == tf.estimator.ModeKeys.TRAIN:
-      noise = tf.random_uniform(common_layers.shape_list(x))
-      noise = 2.0 * tf.to_float(tf.less(hparams.bottleneck_noise, noise)) - 1.0
-      x *= noise
-      d = x + tf.stop_gradient(2.0 * tf.to_float(tf.less(0.0, x)) - 1.0 - x)
-      p = common_layers.inverse_lin_decay(hparams.discrete_warmup_steps)
-      d = tf.where(tf.less(tf.random_uniform([]), p), d, x)
-    return add_d(layer, d), 0.0
+
+    bits, bits_clean = discretization.tanh_discrete_bottleneck(
+        x, hparams.bottleneck_bits, hparams.bottleneck_noise,
+        hparams.discretize_warmup_steps, hparams.mode)
+    if not hparams.full_latent_tower:
+      _, pred_loss = discretization.predict_bits_with_lstm(
+          layer, hparams.latent_predictor_state_size, hparams.bottleneck_bits,
+          target_bits=bits_clean)
+
+    return add_bits(layer, bits), pred_loss
 
 
 @registry.register_hparams
@@ -168,9 +170,19 @@ def next_frame_sampling_stochastic():
 def next_frame_basic_stochastic_discrete():
   """Basic 2-frame conv model with stochastic discrete latent."""
   hparams = basic_deterministic_params.next_frame_sampling()
-  hparams.add_hparam("bottleneck_bits", 32)
-  hparams.add_hparam("bottleneck_noise", 0.05)
-  hparams.add_hparam("discrete_warmup_steps", 4000)
+  hparams.batch_size = 2
+  hparams.video_num_target_frames = 16
+  hparams.scheduled_sampling_mode = "prob_inverse_lin"
+  hparams.scheduled_sampling_decay_steps = 40000
+  hparams.scheduled_sampling_prob = 1.0
+  hparams.learning_rate_constant = 0.01
+  hparams.learning_rate_warmup_steps = 8000
+  hparams.learning_rate_schedule = "linear_warmup * constant"
+  hparams.add_hparam("bottleneck_bits", 64)
+  hparams.add_hparam("bottleneck_noise", 0.02)
+  hparams.add_hparam("discretize_warmup_steps", 40000)
   hparams.add_hparam("full_latent_tower", False)
+  hparams.add_hparam("latent_predictor_state_size", 128)
+  hparams.add_hparam("latent_predictor_temperature", 0.5)
   hparams.add_hparam("complex_addn", True)
   return hparams

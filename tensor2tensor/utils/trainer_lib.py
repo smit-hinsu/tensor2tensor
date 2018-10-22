@@ -24,9 +24,11 @@ import os
 import random
 import numpy as np
 
+from tensor2tensor.data_generators.problem import Problem
 from tensor2tensor.utils import decoding
 from tensor2tensor.utils import devices
 from tensor2tensor.utils import metrics_hook
+from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
 
@@ -104,7 +106,8 @@ def is_cloud_async_distributed():
           json.loads(os.environ.get("TF_CONFIG", "{}")).get("cluster", {}))
 
 
-def create_run_config(master="",
+def create_run_config(model_name,
+                      master="",
                       model_dir=None,
                       iterations_per_loop=1000,
                       num_shards=8,
@@ -120,6 +123,7 @@ def create_run_config(master="",
                       enable_graph_rewriter=False,
                       gpu_mem_fraction=0.95,
                       no_data_parallelism=False,
+                      optionally_use_dist_strat=False,
                       daisy_chain_variables=True,
                       schedule="continuous_train_and_eval",
                       worker_job="/job:localhost",
@@ -204,20 +208,36 @@ def create_run_config(master="",
     config.t2t_device_info = {
         "num_async_replicas": num_async_replicas,
     }
-    config.data_parallelism = devices.data_parallelism(
-        daisy_chain_variables=daisy_chain_variables,
-        ps_replicas=ps_replicas,
-        ps_job=ps_job,
-        ps_gpu=ps_gpu,
-        schedule=schedule,
-        sync=sync,
-        worker_gpu=num_gpus,
-        worker_replicas=num_async_replicas,
-        worker_id=worker_id,
-        gpu_order=gpu_order,
-        locally_shard_to_cpu=shard_to_cpu,
-        worker_job=worker_job,
-        no_data_parallelism=no_data_parallelism)
+    use_distribution_strategy = (
+        optionally_use_dist_strat and
+        t2t_model.T2TModel.has_symmetric_shards(model_name) and
+        not no_data_parallelism and ps_replicas == 0 and ps_gpu == 0 and
+        num_async_replicas == 1 and not shard_to_cpu)
+
+    if use_distribution_strategy:
+      tf.logging.info(
+          "Configuring MirroredStrategy DistributionStrategy to replicate the "
+          "model."
+      )
+      distribution = tf.contrib.distribute.MirroredStrategy()
+      config = config.replace(train_distribute=distribution)
+      config.data_parallelism = None
+    else:
+      tf.logging.info("Configuring DataParallelism to replicate the model.")
+      config.data_parallelism = devices.data_parallelism(
+          daisy_chain_variables=daisy_chain_variables,
+          ps_replicas=ps_replicas,
+          ps_job=ps_job,
+          ps_gpu=ps_gpu,
+          schedule=schedule,
+          sync=sync,
+          worker_gpu=num_gpus,
+          worker_replicas=num_async_replicas,
+          worker_id=worker_id,
+          gpu_order=gpu_order,
+          locally_shard_to_cpu=shard_to_cpu,
+          worker_job=worker_job,
+          no_data_parallelism=no_data_parallelism)
 
   return config
 
@@ -240,6 +260,8 @@ def create_estimator(model_name,
     batch_size = (
         problem.tpu_batch_size_per_shard(hparams) *
         run_config.tpu_config.num_shards)
+    mlperf_log.transformer_print(
+        key=mlperf_log.INPUT_BATCH_SIZE, value=batch_size)
     if getattr(hparams, "mtf_mode", False):
       batch_size = problem.tpu_batch_size_per_shard(hparams)
     predict_batch_size = batch_size
@@ -340,10 +362,43 @@ class T2TExperiment(object):
       self.train()
 
   def train(self, max_steps=None):
+    mlperf_log.transformer_print(key=mlperf_log.TRAIN_LOOP)
     self._estimator.train(
         self._train_spec.input_fn,
         hooks=self._train_spec.hooks,
         max_steps=max_steps or self._train_spec.max_steps)
+
+  def train_eval_and_decode(self):
+    """Does eval and decode after training every eval_freq_in_steps."""
+    eval_steps = self._hparams.eval_freq_in_steps
+    packed_dataset = "_packed" in self._hparams.problem.name
+    mlperf_log.transformer_print(key=mlperf_log.TRAIN_LOOP)
+    for i in range(0, self._train_spec.max_steps, eval_steps):
+      mlperf_log.transformer_print(
+          key=mlperf_log.TRAIN_EPOCH, value=i // eval_steps)
+      if packed_dataset and i > 0:
+        problem = registry.problem(self._hparams.problem.name + "_packed")
+        p_hparams = problem.get_hparams(self._hparams)
+        self._hparams.problem = problem
+        self._hparams.problem_hparams = p_hparams
+      self._estimator.train(
+          self._train_spec.input_fn,
+          steps=eval_steps,
+          hooks=self._train_spec.hooks)
+      self._estimator.evaluate(
+          self._eval_spec.input_fn,
+          steps=self._eval_spec.steps,
+          hooks=self._eval_spec.hooks)
+      if packed_dataset:
+        problem = registry.problem(
+            self._hparams.problem.name.replace("_packed", ""))
+        p_hparams = problem.get_hparams(self._hparams)
+        self._hparams.problem = problem
+        self._hparams.problem_hparams = p_hparams
+      mlperf_log.transformer_print(key=mlperf_log.EVAL_START)
+      self.decode(dataset_split=tf.estimator.ModeKeys.EVAL)
+      mlperf_log.transformer_print(key=mlperf_log.EVAL_TARGET, value=25.0)
+      mlperf_log.transformer_print(key=mlperf_log.EVAL_STOP)
 
   def evaluate(self):
     return self._estimator.evaluate(
@@ -470,6 +525,7 @@ def create_experiment(
   hparams.add_hparam("schedule", schedule)
   hparams.add_hparam("warm_start_from", warm_start_from)
   hparams.add_hparam("std_server_protocol", std_server_protocol)
+  hparams.add_hparam("eval_freq_in_steps", min_eval_frequency)
   if decode_hparams is not None:
     decode_hparams.add_hparam("decode_from_file", decode_from_file)
     decode_hparams.add_hparam("decode_to_file", decode_to_file)
@@ -581,11 +637,13 @@ def create_experiment_fn(*args, **kwargs):
   return experiment_fn
 
 
-def add_problem_hparams(hparams, problem_name):
+def add_problem_hparams(hparams, problem_name_or_instance):
   """Add problem hparams for the problems."""
-  problem = registry.problem(problem_name)
+  if isinstance(problem_name_or_instance, Problem):
+    problem = problem_name_or_instance
+  else:
+    problem = registry.problem(problem_name_or_instance)
   p_hparams = problem.get_hparams(hparams)
-
   hparams.problem = problem
   hparams.problem_hparams = p_hparams
 
