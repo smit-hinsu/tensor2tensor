@@ -600,6 +600,7 @@ def create_experiment(
     decode_to_file=None,
     decode_reference=None,
     std_server_protocol=None):
+  train_steps = None
   """Create Experiment."""
   # HParams
   hparams.add_hparam("model_dir", run_config.model_dir)
