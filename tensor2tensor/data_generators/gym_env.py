@@ -21,7 +21,7 @@ from __future__ import print_function
 
 import collections
 import itertools
-
+import random
 import gym
 from gym.spaces import Box
 import numpy as np
@@ -29,6 +29,7 @@ import numpy as np
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import problem
 from tensor2tensor.data_generators import video_utils
+from tensor2tensor.layers import modalities
 from tensor2tensor.utils import metrics
 from tensor2tensor.utils import registry
 
@@ -84,14 +85,22 @@ class EnvSimulationProblem(video_utils.VideoProblem):
 
   def hparams(self, defaults, unused_model_hparams):
     p = defaults
-    def make_modality(name):
-      return {
-          "{}s".format(name): ("video", 256),
-          "{}_reward".format(name): ("symbol:weights_all", self.num_rewards),
-          "{}_action".format(name): ("symbol:weights_all", self.num_actions)
-      }
-    p.input_modality = make_modality("input")
-    p.target_modality = make_modality("target")
+    p.modality = {
+        "inputs": modalities.VideoModality,
+        "input_reward": modalities.SymbolModalityWeightsAll,
+        "input_action": modalities.SymbolModalityWeightsAll,
+        "targets": modalities.VideoModality,
+        "target_reward": modalities.SymbolModalityWeightsAll,
+        "target_action": modalities.SymbolModalityWeightsAll,
+    }
+    p.vocab_size = {
+        "inputs": 256,
+        "input_reward": self.num_rewards,
+        "input_action": self.num_actions,
+        "targets": 256,
+        "target_reward": self.num_rewards,
+        "target_action": self.num_actions,
+    }
     p.input_space_id = problem.SpaceID.IMAGE
     p.target_space_id = problem.SpaceID.IMAGE
 
@@ -530,14 +539,11 @@ class T2TGymEnv(T2TEnv):
   arguments and register this subclass.
   """
 
-  def __init__(self, base_env_name=None, batch_size=None, grayscale=False,
+  noop_action = 0
+
+  def __init__(self, base_env_name=None, batch_size=1, grayscale=False,
                resize_height_factor=2, resize_width_factor=2,
-               base_env_timesteps_limit=-1, envs=None, **kwargs):
-    if batch_size is None:
-      if envs is None:
-        batch_size = 1
-      else:
-        batch_size = len(envs)
+               base_env_timesteps_limit=-1, max_num_noops=0, **kwargs):
     if base_env_name is None:
       base_env_name = self.base_env_name
     self._base_env_name = base_env_name
@@ -549,11 +555,15 @@ class T2TGymEnv(T2TEnv):
       # Set problem name if not registered.
       self.name = "Gym%s" % base_env_name
 
-    if envs is None:
-      self._envs = [make_gym_env(base_env_name, base_env_timesteps_limit)
-                    for _ in range(self.batch_size)]
-    else:
-      self._envs = envs
+    self._envs = [make_gym_env(base_env_name, base_env_timesteps_limit)
+                  for _ in range(self.batch_size)]
+
+    # max_num_noops works only with atari envs.
+    if max_num_noops > 0:
+      assert self._envs[0].unwrapped.get_action_meanings()[
+          self.noop_action
+      ] == "NOOP"
+    self.max_num_noops = max_num_noops
 
     orig_observ_space = self._envs[0].observation_space
     if not all(env.observation_space == orig_observ_space
@@ -613,7 +623,22 @@ class T2TGymEnv(T2TEnv):
     return tuple(map(np.stack, (obs, rewards, dones)))
 
   def _reset(self, indices):
-    return np.stack([self._envs[index].reset() for index in indices])
+    def reset_with_noops(env):
+      """Resets environment and applies random number of NOOP actions on it."""
+      obs = env.reset()
+      try:
+        num_noops = random.randint(1, self.max_num_noops)
+      except ValueError:
+        num_noops = 0
+
+      for _ in range(num_noops):
+        (obs, _, done, _) = env.step(self.noop_action)
+        if done:
+          obs = env.reset()
+
+      return obs
+
+    return np.stack([reset_with_noops(self._envs[index]) for index in indices])
 
   def close(self):
     for env in self._envs:
@@ -715,6 +740,10 @@ ATARI_GAME_MODES = [
 ]
 
 
+def camel_case_name(snake_case_name):
+  return "".join([w[0].upper() + w[1:] for w in snake_case_name.split("_")])
+
+
 def register_game(game_name, game_mode="Deterministic-v4"):
   """Create and register problems for the game.
 
@@ -729,9 +758,7 @@ def register_game(game_name, game_mode="Deterministic-v4"):
     raise ValueError("Game %s not in ATARI_GAMES" % game_name)
   if game_mode not in ATARI_GAME_MODES:
     raise ValueError("Unknown ATARI game mode: %s." % game_mode)
-  camel_game_name = "".join(
-      [w[0].upper() + w[1:] for w in game_name.split("_")])
-  camel_game_name += game_mode
+  camel_game_name = camel_case_name(game_name) + game_mode
   # Create and register the Problem
   cls = type("Gym%sRandom" % camel_game_name,
              (T2TGymEnv,), {"base_env_name": camel_game_name})

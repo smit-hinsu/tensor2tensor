@@ -54,7 +54,7 @@ def rlmb_base():
       num_real_env_frames=96000,
       generative_model="next_frame_basic_deterministic",
       generative_model_params="next_frame_pixel_noise",
-      ppo_params="ppo_pong_base",
+      ppo_params="ppo_atari_base",
       autoencoder_train_steps=0,
       autoencoder_train_steps_initial_multiplier=10,
       autoencoder_hparams_set="autoencoder_discrete_pong",
@@ -84,6 +84,8 @@ def rlmb_base():
       resize_height_factor=2,
       resize_width_factor=2,
       grayscale=False,
+      # Maximum number of noops to make on environment reset.
+      max_num_noops=8,
       # Bump learning rate after first epoch by 3x.
       # We picked 3x because our default learning rate schedule decreases with
       # 1/square root of step; 1/sqrt(10k) = 0.01 and 1/sqrt(100k) ~ 0.0032
@@ -101,6 +103,9 @@ def rlmb_base():
       real_ppo_continue_training=True,
       real_ppo_effective_num_agents=16,
       real_ppo_eval_every_epochs=0,
+
+      eval_num_agents=30,
+      eval_max_num_noops=8,
 
       game="pong",
       # Whether to evaluate the world model in each iteration of the loop to get
@@ -390,6 +395,7 @@ def rlmb_tiny():
           real_ppo_num_agents=1,
           real_ppo_epochs_num=0,
           real_ppo_effective_num_agents=2,
+          eval_num_agents=1,
           generative_model_params="next_frame_tiny",
           stop_loop_early=True,
           resize_height_factor=2,
@@ -677,6 +683,12 @@ def rlmb_logits_clip(rhp):
   rhp.set_categorical("loop.game", ["pong", "boxing", "seaquest"])
   rhp.set_discrete("model.moe_loss_coef", list(range(10)))
   rhp.set_discrete("ppo.logits_clip", [0., 5.])
+
+
+@registry.register_ranged_hparams
+def rlmf_proportional_epoch_length(rhp):
+  rhp.set_discrete("proportional_epoch_length", [10, 20, 50, 100, 200, 400])
+  rhp.set_categorical("loop.game", gym_env.ATARI_GAMES_WITH_HUMAN_SCORE)
 
 
 def merge_unscoped_hparams(scopes_and_hparams):

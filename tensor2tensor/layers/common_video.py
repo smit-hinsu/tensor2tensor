@@ -205,11 +205,8 @@ def scheduled_sample_prob(ground_truth_x,
   """
   probability_threshold = scheduled_sample_var
   probability_of_generated = tf.random_uniform([batch_size])
-  array_ind = tf.to_int32(probability_of_generated > probability_threshold)
-  indices = tf.range(batch_size) + array_ind * batch_size
-  xy = tf.concat([ground_truth_x, generated_x], axis=0)
-  output = tf.gather(xy, indices)
-  return output
+  return tf.where(probability_of_generated > probability_threshold,
+                  generated_x, ground_truth_x)
 
 
 def dna_transformation(prev_image, dna_input, dna_kernel_size, relu_shift):
@@ -343,10 +340,6 @@ def tile_and_concat(image, latent, concat_latent=True):
   latent_shape = common_layers.shape_list(latent)
   height, width = image_shape[1], image_shape[2]
   latent_dims = latent_shape[1]
-
-  if height < latent_dims:
-    raise ValueError("Latent is too big to tile.")
-
   height_multiples = height // latent_dims
   pad = height - (height_multiples * latent_dims)
   latent = tf.reshape(latent, (-1, latent_dims, 1, 1))
