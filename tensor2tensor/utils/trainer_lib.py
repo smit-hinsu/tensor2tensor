@@ -19,6 +19,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
 import json
 import os
 import random
@@ -87,9 +88,12 @@ def create_session_config(log_device_placement=False,
 def create_hparams(hparams_set,
                    hparams_overrides_str="",
                    data_dir=None,
-                   problem_name=None):
+                   problem_name=None,
+                   hparams_path=None):
   """Create HParams with data_dir and problem hparams, if kwargs provided."""
   hparams = registry.hparams(hparams_set)
+  if hparams_path and tf.gfile.Exists(hparams_path):
+    hparams = _create_hparams_from_json(hparams_path, hparams)
   if data_dir:
     hparams.add_hparam("data_dir", data_dir)
   if problem_name:
@@ -98,6 +102,29 @@ def create_hparams(hparams_set,
     tf.logging.info("Overriding hparams in %s with %s", hparams_set,
                     hparams_overrides_str)
     hparams = hparams.parse(hparams_overrides_str)
+  return hparams
+
+
+def _create_hparams_from_json(json_path, hparams=None):
+  """Loading hparams from json; can also start from hparams if specified."""
+  tf.logging.info("Loading hparams from existing json %s" % json_path)
+  with tf.gfile.Open(json_path, "r") as f:
+    hparams_values = json.load(f)
+    new_hparams = tf.contrib.training.HParams(**hparams_values)
+    # Some keys are in new_hparams but not hparams, so we need to be more
+    #   careful than simply using parse_json() from HParams
+    if hparams:  # hparams specified, so update values from json
+      for key in sorted(new_hparams.values().keys()):
+        if hasattr(hparams, key):  # Overlapped keys
+          value = getattr(hparams, key)
+          new_value = getattr(new_hparams, key)
+          if value != new_value:  # Different values
+            tf.logging.info("Overwrite key %s: %s -> %s" % (
+                key, value, new_value))
+            setattr(hparams, key, new_value)
+    else:
+      hparams = new_hparams
+
   return hparams
 
 
@@ -252,7 +279,8 @@ def create_estimator(model_name,
                      use_xla=False):
   """Create a T2T Estimator."""
   model_fn = t2t_model.T2TModel.make_estimator_model_fn(
-      model_name, hparams, decode_hparams=decode_hparams)
+      model_name, hparams, decode_hparams=decode_hparams, use_tpu=use_tpu)
+
 
   del use_xla
   if use_tpu or use_tpu_estimator:
@@ -267,6 +295,9 @@ def create_estimator(model_name,
     predict_batch_size = batch_size
     if decode_hparams and decode_hparams.batch_size:
       predict_batch_size = decode_hparams.batch_size
+    if decode_hparams and run_config.tpu_config:
+      decode_hparams.add_hparam("iterations_per_loop",
+                                run_config.tpu_config.iterations_per_loop)
     estimator = tf.contrib.tpu.TPUEstimator(
         model_fn=model_fn,
         model_dir=run_config.model_dir,
@@ -324,6 +355,12 @@ def create_hooks(use_tfdbg=False,
   return train_hooks, eval_hooks
 
 
+class HookContext(collections.namedtuple(
+    "HookContext",
+    ["estimator", "problem", "hparams"])):
+  pass
+
+
 class T2TExperiment(object):
   """Custom Experiment class for running distributed experiments."""
 
@@ -350,7 +387,11 @@ class T2TExperiment(object):
 
   def continuous_train_and_eval(self, continuous_eval_predicate_fn=None):
     del continuous_eval_predicate_fn
+    mlperf_log.transformer_print(key=mlperf_log.TRAIN_LOOP)
     for epoch in range(10):
+      mlperf_log.transformer_print(
+          key=mlperf_log.TRAIN_EPOCH, value=epoch)
+
       tf.estimator.train_and_evaluate(self._estimator, self._train_spec,
                                       self._eval_spec)
       tf.logging.info("Finished training epoch %d." % (epoch))
@@ -358,8 +399,20 @@ class T2TExperiment(object):
       self.evaluate()
       tf.logging.info("Finished evaluation epoch %d." % (epoch))
 
+      mlperf_log.transformer_print(key=mlperf_log.EVAL_START)
       self.decode(decode_from_file=True)
       tf.logging.info("Finished decode epoch %d." % (epoch))
+
+      d_hparams = self._decode_hparams
+      if d_hparams.mlperf_mode and d_hparams.mlperf_success:
+        mlperf_log.transformer_print(
+            key=mlperf_log.RUN_STOP, value={"success": "true"})
+        break
+
+    d_hparams = self._decode_hparams
+    if d_hparams.mlperf_mode and not d_hparams.mlperf_success:
+      mlperf_log.transformer_print(
+          key=mlperf_log.RUN_STOP, value={"success": "false"})
 
 
   def train_and_evaluate(self):
@@ -405,8 +458,16 @@ class T2TExperiment(object):
         self._hparams.problem_hparams = p_hparams
       mlperf_log.transformer_print(key=mlperf_log.EVAL_START)
       self.decode(dataset_split=tf.estimator.ModeKeys.EVAL)
-      mlperf_log.transformer_print(key=mlperf_log.EVAL_TARGET, value=25.0)
-      mlperf_log.transformer_print(key=mlperf_log.EVAL_STOP)
+      d_hparams = self._decode_hparams
+      if d_hparams.mlperf_mode and d_hparams.mlperf_success:
+        mlperf_log.transformer_print(
+            key=mlperf_log.RUN_STOP, value={"success": "true"})
+        break
+
+    d_hparams = self._decode_hparams
+    if d_hparams.mlperf_mode and not d_hparams.mlperf_success:
+      mlperf_log.transformer_print(
+          key=mlperf_log.RUN_STOP, value={"success": "false"})
 
   def evaluate(self):
     return self._estimator.evaluate(
@@ -486,8 +547,23 @@ class T2TExperiment(object):
 
   def continuous_decode_on_eval_data(self):
     """Decode from dataset on new checkpoint."""
-    for _ in next_checkpoint(self._hparams.model_dir):
+    for ckpt in next_checkpoint(self._hparams.model_dir):
+      current_step = int(os.path.basename(ckpt).split("-")[1])
+      # Skip checkpoint 0.
+      if current_step == 0:
+        continue
+      mlperf_log.transformer_print(key=mlperf_log.EVAL_START)
       self.decode(dataset_split=tf.estimator.ModeKeys.EVAL)
+      d_hparams = self._decode_hparams
+      if d_hparams.mlperf_mode and d_hparams.mlperf_success:
+        mlperf_log.transformer_print(
+            key=mlperf_log.RUN_STOP, value={"success": "true"})
+        break
+
+    d_hparams = self._decode_hparams
+    if d_hparams.mlperf_mode and not d_hparams.mlperf_success:
+      mlperf_log.transformer_print(
+          key=mlperf_log.RUN_STOP, value={"success": "false"})
 
   def continuous_decode_from_file(self):
     """Decode from file on new checkpoint."""
@@ -610,8 +686,12 @@ def create_experiment(
       validation_monitor_kwargs=validation_monitor_kwargs,
       use_early_stopping=use_early_stopping,
       early_stopping_kwargs=early_stopping_kwargs)
-  train_hooks += t2t_model.T2TModel.get_train_hooks(model_name)
-  eval_hooks += t2t_model.T2TModel.get_eval_hooks(model_name)
+
+  hook_context = HookContext(
+      estimator=estimator, problem=problem, hparams=hparams)
+
+  train_hooks += t2t_model.T2TModel.get_train_hooks(model_name, hook_context)
+  eval_hooks += t2t_model.T2TModel.get_eval_hooks(model_name, hook_context)
   if additional_train_hooks:
     train_hooks += additional_train_hooks
   if additional_eval_hooks:

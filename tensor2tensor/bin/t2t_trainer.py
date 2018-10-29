@@ -127,6 +127,7 @@ flags.DEFINE_integer("log_step_count_steps", 100,
                      "out")
 
 
+
 def set_hparams_from_args(args):
   """Set hparams overrides from unparsed args list."""
   if not args:
@@ -155,11 +156,14 @@ def set_hparams_from_args(args):
 
 
 def create_hparams():
+  """Create hparams."""
   if FLAGS.use_tpu and "tpu" not in FLAGS.hparams_set:
     tf.logging.warn("Not all hyperparameter sets work on TPU. "
                     "Prefer hparams_sets with a '_tpu' suffix, "
                     "e.g. transformer_tpu, if available for your model.")
-  return trainer_lib.create_hparams(FLAGS.hparams_set, FLAGS.hparams)
+  hparams_path = os.path.join(FLAGS.output_dir, "hparams.json")
+  return trainer_lib.create_hparams(FLAGS.hparams_set, FLAGS.hparams,
+                                    hparams_path=hparams_path)
 
 
 def create_experiment_fn():
@@ -344,9 +348,12 @@ def run_std_server():
 
 def main(argv):
   tf.logging.set_verbosity(tf.logging.INFO)
-  mlperf_log.transformer_print(key=mlperf_log.RUN_START)
+  if FLAGS.schedule != "train":
+    mlperf_log.transformer_print(key=mlperf_log.RUN_START)
   if FLAGS.schedule == "run_std_server":
     run_std_server()
+  mlperf_log.transformer_print(
+      key=mlperf_log.RUN_SET_RANDOM_SEED, value=FLAGS.random_seed)
   trainer_lib.set_random_seed(FLAGS.random_seed)
   usr_dir.import_usr_dir(FLAGS.t2t_usr_dir)
   maybe_log_registry_and_exit()
@@ -370,8 +377,8 @@ def main(argv):
   if is_chief():
     save_metadata(hparams)
   execute_schedule(exp)
-  mlperf_log.transformer_print(key=mlperf_log.RUN_STOP)
-  mlperf_log.transformer_print(key=mlperf_log.RUN_FINAL)
+  if FLAGS.schedule != "train":
+    mlperf_log.transformer_print(key=mlperf_log.RUN_FINAL)
 
 
 if __name__ == "__main__":
