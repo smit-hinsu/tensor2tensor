@@ -387,6 +387,8 @@ class T2TExperiment(object):
 
   def continuous_train_and_eval(self, continuous_eval_predicate_fn=None):
     del continuous_eval_predicate_fn
+    packed_dataset = "_packed" in self._hparams.problem.name
+
     mlperf_log.transformer_print(key=mlperf_log.TRAIN_LOOP)
 
     for epoch in range(10):
@@ -401,6 +403,13 @@ class T2TExperiment(object):
       self.evaluate()
       tf.logging.info("Finished evaluation epoch %d." % (epoch))
 
+      if packed_dataset:
+        problem = registry.problem(
+            self._hparams.problem.name.replace("_packed", ""))
+        p_hparams = problem.get_hparams(self._hparams)
+        self._hparams.problem = problem
+        self._hparams.problem_hparams = p_hparams
+
       mlperf_log.transformer_print(key=mlperf_log.EVAL_START)
       self.decode(decode_from_file=True)
       tf.logging.info("Finished decode epoch %d." % (epoch))
@@ -410,6 +419,12 @@ class T2TExperiment(object):
         mlperf_log.transformer_print(
             key=mlperf_log.RUN_STOP, value={"success": "true"})
         break
+
+      if packed_dataset:
+        problem = registry.problem(self._hparams.problem.name + "_packed")
+        p_hparams = problem.get_hparams(self._hparams)
+        self._hparams.problem = problem
+        self._hparams.problem_hparams = p_hparams
 
     d_hparams = self._decode_hparams
     if d_hparams.mlperf_mode and not d_hparams.mlperf_success:
