@@ -396,8 +396,9 @@ class T2TExperiment(object):
       mlperf_log.transformer_print(
           key=mlperf_log.TRAIN_EPOCH, value=epoch)
 
-      tf.estimator.train_and_evaluate(self._estimator, self._train_spec,
-                                      self._eval_spec)
+      self.train()
+      # tf.estimator.train_and_evaluate(self._estimator, self._train_spec,
+      #                                 self._eval_spec)
       tf.logging.info("Finished training epoch %d." % (epoch))
 
       self.evaluate()
