@@ -72,7 +72,8 @@ def decode_hparams(overrides=""):
       frames_per_second=10,
       skip_eos_postprocess=False,
       # Used for MLPerf compliance logging.
-      mlperf_mode=False,
+      current_epoch=0,
+      mlperf_mode=True,
       mlperf_threshold=25.0,
       mlperf_success=False)
   hp.parse(overrides)

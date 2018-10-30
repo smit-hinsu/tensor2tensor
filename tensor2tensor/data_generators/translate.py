@@ -80,12 +80,7 @@ def compute_bleu_summaries(hook_args):
   """
   decode_hparams = hook_args.decode_hparams
   estimator = hook_args.estimator
-  current_step = estimator.get_variable_value(tf.GraphKeys.GLOBAL_STEP)
-  if current_step and decode_hparams.iterations_per_loop:
-    iterations_per_loop = decode_hparams.iterations_per_loop
-    current_epoch = np.asscalar(current_step) // iterations_per_loop
-  else:
-    current_epoch = 0
+  current_epoch = decode_hparams.current_epoch
 
   if (decode_hparams.decode_reference is None or
       decode_hparams.decode_to_file is None):
@@ -102,7 +97,7 @@ def compute_bleu_summaries(hook_args):
     mlperf_log.transformer_print(
         key=mlperf_log.EVAL_ACCURACY,
         value={
-            "epoch": max(current_epoch - 1, 0),
+            "epoch": current_epoch,
             "value": bleu
         })
     mlperf_log.transformer_print(key=mlperf_log.EVAL_STOP)

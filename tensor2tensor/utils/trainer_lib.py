@@ -388,7 +388,9 @@ class T2TExperiment(object):
   def continuous_train_and_eval(self, continuous_eval_predicate_fn=None):
     del continuous_eval_predicate_fn
     mlperf_log.transformer_print(key=mlperf_log.TRAIN_LOOP)
+
     for epoch in range(10):
+      self._decode_hparams.current_epoch = epoch
       mlperf_log.transformer_print(
           key=mlperf_log.TRAIN_EPOCH, value=epoch)
 
